@@ -1,2 +1,6 @@
 .pio/
 .vscode/
+.cache/
+.clangd
+compile_commands.json
+get-pip.py
