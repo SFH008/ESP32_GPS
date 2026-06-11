@@ -1,7 +1,7 @@
 {
-  "name": "esp32_gps",
+  "name": "esp32-s3-gps-n2k",
   "version": "1.0.0",
-  "description": "��#\u0000 \u0000E\u0000S\u0000P\u00003\u00002\u0000_\u0000G\u0000P\u0000S\u0000\r\u0000 \u0000",
+  "description": "ESP32-S3 NMEA 2000 GPS node — u-blox M10 via HGLRC M100 Pro to STNG/N2K bus",
   "homepage": "https://github.com/SFH008/ESP32_GPS#readme",
   "bugs": {
     "url": "https://github.com/SFH008/ESP32_GPS/issues"
@@ -10,11 +10,6 @@
     "type": "git",
     "url": "git+https://github.com/SFH008/ESP32_GPS.git"
   },
-  "license": "ISC",
-  "author": "",
-  "type": "commonjs",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  }
+  "license": "MIT",
+  "author": "SFH008"
 }
