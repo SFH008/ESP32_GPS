@@ -10,24 +10,27 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ── TWAI (CAN) — SN65HVD230 transceiver ─────────────────────────────────────
-// GPIO4 → TXD on SN65HVD230
-// GPIO5 ← RXD on SN65HVD230
-// Rs pin on SN65HVD230 → GND (normal speed, not slope-controlled)
 #define TWAI_TX_PIN     GPIO_NUM_4
 #define TWAI_RX_PIN     GPIO_NUM_5
 
 // ── GPS UART — HGLRC M100 Pro (u-blox M10) ──────────────────────────────────
-// JST-GH 1.25mm 6-pin: 5V, GND, TX, RX (+ compass SDA/SCL, unused)
-// M100 Pro power → 5V (VBUS on DevKitC-1), NOT 3.3V
-// UART logic is 3.3V — connect directly, no level shifter needed
-// GPIO16 ← TX pin on M100 Pro
-// GPIO17 → RX pin on M100 Pro
-#define GPS_UART_PORT       1           // Serial1
+#define GPS_UART_PORT       1
 #define GPS_UART_RX_PIN     16
 #define GPS_UART_TX_PIN     17
-#define GPS_BAUD_INITIAL    38400       // M10 factory default
-#define GPS_BAUD_TARGET     115200      // Reconfigured on first boot
-#define GPS_UPDATE_HZ       10          // 10 Hz
+#define GPS_BAUD_INITIAL    115200      // M100 Pro factory default (confirmed via UART test)
+#define GPS_BAUD_TARGET     115200      // Already at target — no reconfiguration needed
+#define GPS_UPDATE_HZ       10
+
+// ── WiFi / OTA ───────────────────────────────────────────────────────────────
+// Credentials are NOT stored here — WiFiManager handles them via captive portal.
+// On first boot (or after reset), the node broadcasts an AP named WIFI_AP_NAME.
+// Connect your phone/laptop to that AP and enter your WiFi credentials.
+// They are saved to NVS flash and used automatically on all subsequent boots.
+// To re-configure: call wm.resetSettings() or hold a button (future feature).
+#define WIFI_AP_NAME            "GPS-N2K-Setup"     // AP name shown on your phone
+#define WIFI_PORTAL_TIMEOUT     60                  // Seconds before giving up and continuing without WiFi
+#define OTA_HOSTNAME            "gps-n2k"
+#define OTA_PORT                3232
 
 // ── NMEA 2000 Device Identity ─────────────────────────────────────────────────
 #define N2K_UNIQUE_NUMBER           2002
@@ -51,9 +54,3 @@
 
 // ── GPS Fix Quality ───────────────────────────────────────────────────────────
 #define MIN_SATELLITES_FOR_VALID    4
-
-// ── OTA / WiFi ────────────────────────────────────────────────────────────────
-#define WIFI_SSID           "your-ssid"
-#define WIFI_PASSWORD       "your-password"
-#define OTA_HOSTNAME        "gps-n2k"
-#define OTA_PORT            3232

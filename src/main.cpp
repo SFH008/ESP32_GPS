@@ -1,9 +1,9 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
+#include <WiFiManager.h>
 
 // ── NMEA 2000 via TWAI ───────────────────────────────────────────────────────
-// Do NOT use NMEA2000_CAN.h — on ESP32 it selects the wrong (SPI/MCP2515) driver.
 #include <NMEA2000_esp32_twai.h>
 #include <N2kMessages.h>
 #include <N2kDef.h>
@@ -19,6 +19,8 @@
 
 NMEA2000_esp32_twai  NMEA2000(TWAI_TX_PIN, TWAI_RX_PIN);
 SFE_UBLOX_GNSS_SERIAL gps;
+
+bool wifiConnected = false;
 
 uint32_t lastPos     = 0;
 uint32_t lastCogSog  = 0;
@@ -47,6 +49,20 @@ const unsigned long TX_PGN_LIST[] PROGMEM = {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  Date helper
+// ═══════════════════════════════════════════════════════════════════════════
+
+static uint16_t dateToDaysSince1970(uint16_t year, uint8_t month, uint8_t day) {
+    uint32_t y = year, m = month, d = day;
+    if (m <= 2) { y--; m += 12; }
+    uint32_t era = y / 400;
+    uint32_t yoe = y - era * 400;
+    uint32_t doy = (153 * (m - 3) + 2) / 5 + d - 1;
+    uint32_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (uint16_t)(era * 146097 + doe - 719468);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  UBX NAV-PVT callback
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -70,18 +86,6 @@ void onGpsData(UBX_NAV_PVT_data_t *d) {
         gpsData.cogRad = (d->headMot * 1e-5) * DEG_TO_RAD;
         gpsData.hdop   = d->pDOP  * 0.01;
     }
-}
-
-// Days since 1970-01-01 — required for N2K date fields
-static uint16_t dateToDaysSince1970(uint16_t year, uint8_t month, uint8_t day) {
-    // Zeller/Unix epoch calculation
-    uint32_t y = year, m = month, d = day;
-    if (m <= 2) { y--; m += 12; }
-    uint32_t era  = y / 400;
-    uint32_t yoe  = y - era * 400;
-    uint32_t doy  = (153 * (m - 3) + 2) / 5 + d - 1;
-    uint32_t doe  = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    return (uint16_t)(era * 146097 + doe - 719468);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -123,22 +127,37 @@ void sendPGN126992() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  WiFi + OTA
+//  WiFi — WiFiManager with timeout
 // ═══════════════════════════════════════════════════════════════════════════
 
-void setupWiFiAndOTA() {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    Serial.printf("[WiFi] Connecting to %s", WIFI_SSID);
-    uint8_t tries = 0;
-    while (WiFi.status() != WL_CONNECTED && tries < 20) {
-        delay(500); Serial.print("."); tries++;
+void setupWiFi() {
+    WiFiManager wm;
+
+    // Silent — no debug output to serial
+    wm.setDebugOutput(false);
+
+    // If the portal is triggered, time out after 60s and continue without WiFi
+    // so the N2K bus is never blocked waiting for credentials
+    wm.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT);
+
+    // Custom AP name and no password so it's easy to find on a phone
+    bool connected = wm.autoConnect(WIFI_AP_NAME);
+
+    if (connected) {
+        wifiConnected = true;
+        Serial.printf("[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
+    } else {
+        wifiConnected = false;
+        Serial.println("[WiFi] Not connected — N2K running without OTA.");
     }
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("\n[WiFi] Failed — OTA unavailable. Continuing.");
-        return;
-    }
-    Serial.printf("\n[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  OTA — only started if WiFi connected
+// ═══════════════════════════════════════════════════════════════════════════
+
+void setupOTA() {
+    if (!wifiConnected) return;
     ArduinoOTA.setHostname(OTA_HOSTNAME);
     ArduinoOTA.setPort(OTA_PORT);
     ArduinoOTA.onStart([]()  { Serial.println("[OTA] Starting..."); });
@@ -182,23 +201,25 @@ void setupNMEA2000() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void setupGPS() {
-    Serial1.begin(GPS_BAUD_INITIAL, SERIAL_8N1, GPS_UART_RX_PIN, GPS_UART_TX_PIN);
-    if (!gps.begin(Serial1)) {
-        Serial1.end();
-        Serial1.begin(GPS_BAUD_TARGET, SERIAL_8N1, GPS_UART_RX_PIN, GPS_UART_TX_PIN);
-        if (!gps.begin(Serial1)) {
-            Serial.println("[GPS] *** Not detected — check JST-GH wiring and 5V supply ***");
-            while (true) { ArduinoOTA.handle(); delay(1000); }
-        }
-    }
-    gps.setSerialRate(GPS_BAUD_TARGET);
-    Serial1.end();
     Serial1.begin(GPS_BAUD_TARGET, SERIAL_8N1, GPS_UART_RX_PIN, GPS_UART_TX_PIN);
-    gps.begin(Serial1);
+    delay(100);  // let UART settle
+
+    uint8_t retries = 5;
+    while (!gps.begin(Serial1, 1100, true) && retries > 0) {
+        Serial.println("[GPS] Handshake retry...");
+        delay(500);
+        retries--;
+    }
+
+    if (retries == 0) {
+        Serial.println("[GPS] *** Not detected — check JST-GH wiring and 5V supply ***");
+        while (true) { ArduinoOTA.handle(); delay(1000); }
+    }
+
     gps.setUART1Output(COM_TYPE_UBX);
     gps.setNavigationFrequency(GPS_UPDATE_HZ);
     gps.setDynamicModel(DYN_MODEL_SEA);
-    gps.setAutoPVTcallbackPtr(&onGpsData);
+    gps.setAutoPVTcallbackPtr(&onGpsData);   // register AFTER begin() succeeds
     gps.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT);
     Serial.printf("[GPS] HGLRC M100 Pro (u-blox M10) ready — %d Hz, SEA model\n", GPS_UPDATE_HZ);
 }
@@ -214,14 +235,17 @@ void setup() {
     Serial.println(" ESP32-S3 NMEA 2000 GPS Node  v1.0.0");
     Serial.println(" XH-S3E + HGLRC M100 Pro + SN65HVD230");
     Serial.println("══════════════════════════════════════");
-    setupWiFiAndOTA();
+
+    setupWiFi();
+    setupOTA();
     setupNMEA2000();
     setupGPS();
+
     Serial.println("[BOOT] GPS ready. Waiting for fix...");
 }
 
 void loop() {
-    ArduinoOTA.handle();
+    if (wifiConnected) ArduinoOTA.handle();
     gps.checkUblox();
     gps.checkCallbacks();
     NMEA2000.ParseMessages();
@@ -232,3 +256,4 @@ void loop() {
     if (now - lastGnss    >= INTERVAL_PGN_129029) { lastGnss    = now; sendPGN129029(); }
     if (now - lastSysTime >= INTERVAL_PGN_126992) { lastSysTime = now; sendPGN126992(); }
 }
+
