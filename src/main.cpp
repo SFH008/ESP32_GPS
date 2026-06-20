@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WebServer.h>
 #include <ArduinoOTA.h>
 #include <WiFiManager.h>
 #include <PubSubClient.h>
@@ -24,6 +25,7 @@ SFE_UBLOX_GNSS_SERIAL gps;
 
 WiFiClient   espClient;
 PubSubClient mqttClient(espClient);
+WebServer    webServer(80);
 
 bool wifiConnected = false;
 
@@ -178,6 +180,124 @@ void publishMqtt() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  Web Dashboard — status page with auto-refreshing map
+// ═══════════════════════════════════════════════════════════════════════════
+
+const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPS N2K Node</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 0; background: #0d1b2a; color: #e0e6ed; }
+  header { padding: 14px 18px; background: #13283f; border-bottom: 1px solid #1f3a5a; }
+  h1 { font-size: 18px; margin: 0; }
+  #map { height: 320px; width: 100%; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1px; background: #1f3a5a; }
+  .cell { background: #0d1b2a; padding: 12px 14px; }
+  .label { font-size: 11px; color: #7a93ab; text-transform: uppercase; letter-spacing: 0.5px; }
+  .value { font-size: 20px; font-weight: 600; margin-top: 4px; }
+  .ok { color: #4ade80; }
+  .bad { color: #f87171; }
+  footer { padding: 10px 18px; font-size: 11px; color: #5a7290; }
+</style>
+</head>
+<body>
+<header><h1>⚓ GPS N2K Node — XH-S3E + M100 Pro</h1></header>
+<div id="map"></div>
+<div class="grid" id="grid"></div>
+<footer id="footer"></footer>
+<script>
+let map = L.map('map').setView([0,0], 2);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+let marker = null;
+let firstFix = true;
+
+async function refresh() {
+  try {
+    const r = await fetch('/status.json');
+    const d = await r.json();
+
+    if (d.fix) {
+      if (!marker) {
+        marker = L.marker([d.lat, d.lon]).addTo(map);
+      } else {
+        marker.setLatLng([d.lat, d.lon]);
+      }
+      if (firstFix) { map.setView([d.lat, d.lon], 15); firstFix = false; }
+    }
+
+    document.getElementById('grid').innerHTML = `
+      <div class="cell"><div class="label">Fix</div><div class="value ${d.fix ? 'ok' : 'bad'}">${d.fix ? 'YES' : 'NO FIX'}</div></div>
+      <div class="cell"><div class="label">Satellites</div><div class="value">${d.numSV}</div></div>
+      <div class="cell"><div class="label">HDOP</div><div class="value">${d.hdop.toFixed(2)}</div></div>
+      <div class="cell"><div class="label">Latitude</div><div class="value">${d.lat.toFixed(6)}</div></div>
+      <div class="cell"><div class="label">Longitude</div><div class="value">${d.lon.toFixed(6)}</div></div>
+      <div class="cell"><div class="label">Altitude</div><div class="value">${d.alt_m.toFixed(1)} m</div></div>
+      <div class="cell"><div class="label">SOG</div><div class="value">${d.sog_kn.toFixed(2)} kn</div></div>
+      <div class="cell"><div class="label">COG</div><div class="value">${d.cog_deg.toFixed(1)}°</div></div>
+      <div class="cell"><div class="label">N2K Bus</div><div class="value ok">OPEN</div></div>
+      <div class="cell"><div class="label">MQTT</div><div class="value ${d.mqtt ? 'ok' : 'bad'}">${d.mqtt ? 'CONNECTED' : 'DOWN'}</div></div>
+      <div class="cell"><div class="label">Uptime</div><div class="value">${d.uptime_s}s</div></div>
+      <div class="cell"><div class="label">GPS Time</div><div class="value">${d.time}</div></div>
+    `;
+    document.getElementById('footer').textContent =
+      `IP ${d.ip} · OTA :${d.ota_port} · Free heap ${d.heap} bytes · Refreshed ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    document.getElementById('footer').textContent = 'Connection lost — retrying...';
+  }
+}
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>
+)rawliteral";
+
+void handleRoot() {
+    webServer.send_P(200, "text/html", DASHBOARD_HTML);
+}
+
+void handleStatusJson() {
+    JsonDocument doc;
+    doc["fix"]     = gpsData.valid;
+    doc["lat"]     = gpsData.lat;
+    doc["lon"]     = gpsData.lon;
+    doc["alt_m"]   = gpsData.altMSL;
+    doc["sog_kn"]  = gpsData.sogMs * 1.94384;
+    doc["cog_deg"] = gpsData.cogRad * RAD_TO_DEG;
+    doc["hdop"]    = gpsData.hdop;
+    doc["numSV"]   = gpsData.numSV;
+    doc["mqtt"]    = mqttClient.connected();
+    doc["uptime_s"] = millis() / 1000;
+    doc["ip"]       = WiFi.localIP().toString();
+    doc["ota_port"] = OTA_PORT;
+    doc["heap"]     = ESP.getFreeHeap();
+    doc["time"]    = String(gpsData.year) + "-" +
+                      (gpsData.month < 10 ? "0" : "") + String(gpsData.month) + "-" +
+                      (gpsData.day   < 10 ? "0" : "") + String(gpsData.day)   + " " +
+                      (gpsData.hour   < 10 ? "0" : "") + String(gpsData.hour)   + ":" +
+                      (gpsData.minute < 10 ? "0" : "") + String(gpsData.minute) + ":" +
+                      (gpsData.second < 10 ? "0" : "") + String(gpsData.second) + "Z";
+
+    String out;
+    serializeJson(doc, out);
+    webServer.send(200, "application/json", out);
+}
+
+void setupWebServer() {
+    if (!wifiConnected) return;
+    webServer.on("/", handleRoot);
+    webServer.on("/status.json", handleStatusJson);
+    webServer.begin();
+    Serial.printf("[WEB] Dashboard ready — http://%s/\n", WiFi.localIP().toString().c_str());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  WiFi — WiFiManager with timeout
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -264,7 +384,7 @@ void setupGPS() {
 
     if (retries == 0) {
         Serial.println("[GPS] *** Not detected — check JST-GH wiring and 5V supply ***");
-        while (true) { ArduinoOTA.handle(); delay(1000); }
+        while (true) { ArduinoOTA.handle(); webServer.handleClient(); delay(10); }
     }
 
     gps.setUART1Output(COM_TYPE_UBX);
@@ -290,6 +410,7 @@ void setup() {
     setupWiFi();
     setupOTA();
     setupMqtt();
+    setupWebServer();
     setupNMEA2000();
     setupGPS();
 
@@ -300,6 +421,7 @@ void loop() {
     if (wifiConnected) {
         ArduinoOTA.handle();
         mqttClient.loop();
+        webServer.handleClient();
     }
     gps.checkUblox();
     gps.checkCallbacks();
