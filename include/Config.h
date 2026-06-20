@@ -32,6 +32,13 @@
 #define OTA_HOSTNAME            "gps-n2k"
 #define OTA_PORT                3232
 
+// ── MQTT ─────────────────────────────────────────────────────────────────────
+// Publishes a single JSON payload per update to the Mosquitto broker on NUC2
+#define MQTT_BROKER          "192.168.2.120"
+#define MQTT_PORT             1883
+#define MQTT_TOPIC_GPS        "gps-n2k/position"
+#define INTERVAL_MQTT_MS       1000     // 1 Hz — matches GNSS/SysTime PGN rate
+
 // ── NMEA 2000 Device Identity ─────────────────────────────────────────────────
 #define N2K_UNIQUE_NUMBER           2002
 #define N2K_MANUFACTURER_CODE       2046

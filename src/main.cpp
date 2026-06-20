@@ -2,6 +2,8 @@
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 #include <WiFiManager.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
 
 // ── NMEA 2000 via TWAI ───────────────────────────────────────────────────────
 #include <NMEA2000_esp32_twai.h>
@@ -20,12 +22,16 @@
 NMEA2000_esp32_twai  NMEA2000(TWAI_TX_PIN, TWAI_RX_PIN);
 SFE_UBLOX_GNSS_SERIAL gps;
 
+WiFiClient   espClient;
+PubSubClient mqttClient(espClient);
+
 bool wifiConnected = false;
 
 uint32_t lastPos     = 0;
 uint32_t lastCogSog  = 0;
 uint32_t lastGnss    = 0;
 uint32_t lastSysTime = 0;
+uint32_t lastMqtt    = 0;
 
 struct GpsData {
     double   lat       = 0.0;
@@ -124,6 +130,51 @@ void sendPGN126992() {
         (gpsData.hour * 3600.0) + (gpsData.minute * 60.0) + gpsData.second
     );
     NMEA2000.SendMsg(msg);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  MQTT
+// ═══════════════════════════════════════════════════════════════════════════
+
+void setupMqtt() {
+    if (!wifiConnected) return;
+    mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+}
+
+void mqttReconnect() {
+    if (mqttClient.connected()) return;
+    if (mqttClient.connect(OTA_HOSTNAME)) {
+        Serial.println("[MQTT] Connected.");
+    }
+    // Non-blocking — if it fails, we just try again on the next loop interval
+}
+
+void publishMqtt() {
+    if (!wifiConnected) return;
+    if (!mqttClient.connected()) {
+        mqttReconnect();
+        if (!mqttClient.connected()) return;
+    }
+
+    JsonDocument doc;
+    doc["lat"]     = gpsData.lat;
+    doc["lon"]     = gpsData.lon;
+    doc["alt_m"]   = gpsData.altMSL;
+    doc["sog_kn"]  = gpsData.sogMs * 1.94384;
+    doc["cog_deg"] = gpsData.cogRad * RAD_TO_DEG;
+    doc["hdop"]    = gpsData.hdop;
+    doc["numSV"]   = gpsData.numSV;
+    doc["fix"]     = gpsData.valid;
+    doc["time"]    = String(gpsData.year) + "-" +
+                      (gpsData.month < 10 ? "0" : "") + String(gpsData.month) + "-" +
+                      (gpsData.day   < 10 ? "0" : "") + String(gpsData.day)   + "T" +
+                      (gpsData.hour   < 10 ? "0" : "") + String(gpsData.hour)   + ":" +
+                      (gpsData.minute < 10 ? "0" : "") + String(gpsData.minute) + ":" +
+                      (gpsData.second < 10 ? "0" : "") + String(gpsData.second) + "Z";
+
+    char payload[256];
+    size_t n = serializeJson(doc, payload);
+    mqttClient.publish(MQTT_TOPIC_GPS, payload, n);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -238,6 +289,7 @@ void setup() {
 
     setupWiFi();
     setupOTA();
+    setupMqtt();
     setupNMEA2000();
     setupGPS();
 
@@ -245,7 +297,10 @@ void setup() {
 }
 
 void loop() {
-    if (wifiConnected) ArduinoOTA.handle();
+    if (wifiConnected) {
+        ArduinoOTA.handle();
+        mqttClient.loop();
+    }
     gps.checkUblox();
     gps.checkCallbacks();
     NMEA2000.ParseMessages();
@@ -255,5 +310,5 @@ void loop() {
     if (now - lastCogSog  >= INTERVAL_PGN_129026) { lastCogSog  = now; sendPGN129026(); }
     if (now - lastGnss    >= INTERVAL_PGN_129029) { lastGnss    = now; sendPGN129029(); }
     if (now - lastSysTime >= INTERVAL_PGN_126992) { lastSysTime = now; sendPGN126992(); }
+    if (now - lastMqtt    >= INTERVAL_MQTT_MS)    { lastMqtt    = now; publishMqtt();   }
 }
-
