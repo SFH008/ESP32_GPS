@@ -39,9 +39,11 @@ struct GpsData {
     double   lat       = 0.0;
     double   lon       = 0.0;
     double   altMSL    = 0.0;
+    double   geoidSep  = 0.0;
     double   sogMs     = 0.0;
     double   cogRad    = 0.0;
     double   hdop      = 9.9;
+    double   pdop      = 9.9;
     uint8_t  numSV     = 0;
     uint16_t year      = 0;
     uint8_t  month     = 0;
@@ -87,13 +89,33 @@ void onGpsData(UBX_NAV_PVT_data_t *d) {
     gpsData.minute  = d->min;
     gpsData.second  = d->sec;
     if (fixOk) {
-        gpsData.lat    = d->lat    * 1e-7;
-        gpsData.lon    = d->lon    * 1e-7;
-        gpsData.altMSL = d->hMSL  * 1e-3;
-        gpsData.sogMs  = d->gSpeed * 1e-3;
-        gpsData.cogRad = (d->headMot * 1e-5) * DEG_TO_RAD;
-        gpsData.hdop   = d->pDOP  * 0.01;
+        gpsData.lat      = d->lat    * 1e-7;
+        gpsData.lon      = d->lon    * 1e-7;
+        gpsData.altMSL   = d->hMSL  * 1e-3;
+        // Geoidal separation = height above ellipsoid - height above MSL.
+        // Both fields are present in every NAV-PVT message, no extra UBX
+        // query needed. This is what was previously hardcoded to 0.0 in
+        // PGN 129029, and explains the inflated altitude readings during
+        // initial bring-up — Axiom/Signal K need this to correctly relate
+        // ellipsoidal height (what the GPS measures) to MSL (what charts use).
+        gpsData.geoidSep = (d->height - d->hMSL) * 1e-3;
+        gpsData.sogMs    = d->gSpeed * 1e-3;
+        gpsData.cogRad   = (d->headMot * 1e-5) * DEG_TO_RAD;
+        // pDOP from NAV-PVT used as a fallback only — NAV-DOP below is authoritative
+        // and provides true HDOP separately (NAV-PVT only carries PDOP)
+        gpsData.pdop     = d->pDOP  * 0.01;
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  UBX NAV-DOP callback — authoritative HDOP/PDOP source
+//  Required for Axiom's "meters of accuracy" estimate (PGN 129029 fields 12+13)
+// ═══════════════════════════════════════════════════════════════════════════
+
+void onGpsDop(UBX_NAV_DOP_data_t *d) {
+    if (d == nullptr) return;
+    gpsData.hdop = d->hDOP * 0.01;   // scale factor 0.01 per UBX spec
+    gpsData.pdop = d->pDOP * 0.01;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -120,7 +142,7 @@ void sendPGN129029() {
         gpsData.lat, gpsData.lon, gpsData.altMSL,
         N2kGNSSt_GPS, N2kGNSSm_GNSSfix,
         gpsData.numSV, gpsData.hdop,
-        0.0, 0.0, 0, N2kGNSSt_GPS, 0, 0.0
+        gpsData.pdop, gpsData.geoidSep, 0, N2kGNSSt_GPS, 0, 0.0
     );
     NMEA2000.SendMsg(msg);
 }
@@ -162,9 +184,11 @@ void publishMqtt() {
     doc["lat"]     = gpsData.lat;
     doc["lon"]     = gpsData.lon;
     doc["alt_m"]   = gpsData.altMSL;
+    doc["geoid_sep_m"] = gpsData.geoidSep;
     doc["sog_kn"]  = gpsData.sogMs * 1.94384;
     doc["cog_deg"] = gpsData.cogRad * RAD_TO_DEG;
     doc["hdop"]    = gpsData.hdop;
+    doc["pdop"]    = gpsData.pdop;
     doc["numSV"]   = gpsData.numSV;
     doc["fix"]     = gpsData.valid;
     doc["time"]    = String(gpsData.year) + "-" +
@@ -235,6 +259,7 @@ async function refresh() {
       <div class="cell"><div class="label">Fix</div><div class="value ${d.fix ? 'ok' : 'bad'}">${d.fix ? 'YES' : 'NO FIX'}</div></div>
       <div class="cell"><div class="label">Satellites</div><div class="value">${d.numSV}</div></div>
       <div class="cell"><div class="label">HDOP</div><div class="value">${d.hdop.toFixed(2)}</div></div>
+      <div class="cell"><div class="label">PDOP</div><div class="value">${d.pdop.toFixed(2)}</div></div>
       <div class="cell"><div class="label">Latitude</div><div class="value">${d.lat.toFixed(6)}</div></div>
       <div class="cell"><div class="label">Longitude</div><div class="value">${d.lon.toFixed(6)}</div></div>
       <div class="cell"><div class="label">Altitude</div><div class="value">${d.alt_m.toFixed(1)} m</div></div>
@@ -268,9 +293,11 @@ void handleStatusJson() {
     doc["lat"]     = gpsData.lat;
     doc["lon"]     = gpsData.lon;
     doc["alt_m"]   = gpsData.altMSL;
+    doc["geoid_sep_m"] = gpsData.geoidSep;
     doc["sog_kn"]  = gpsData.sogMs * 1.94384;
     doc["cog_deg"] = gpsData.cogRad * RAD_TO_DEG;
     doc["hdop"]    = gpsData.hdop;
+    doc["pdop"]    = gpsData.pdop;
     doc["numSV"]   = gpsData.numSV;
     doc["mqtt"]    = mqttClient.connected();
     doc["uptime_s"] = millis() / 1000;
@@ -391,6 +418,7 @@ void setupGPS() {
     gps.setNavigationFrequency(GPS_UPDATE_HZ);
     gps.setDynamicModel(DYN_MODEL_SEA);
     gps.setAutoPVTcallbackPtr(&onGpsData);   // register AFTER begin() succeeds
+    gps.setAutoDOPcallbackPtr(&onGpsDop);    // HDOP/PDOP for Axiom accuracy estimate
     gps.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT);
     Serial.printf("[GPS] HGLRC M100 Pro (u-blox M10) ready — %d Hz, SEA model\n", GPS_UPDATE_HZ);
 }
