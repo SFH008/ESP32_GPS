@@ -15,6 +15,7 @@
 #include <SparkFun_u-blox_GNSS_v3.h>
 
 #include "Config.h"
+#include "AlertManager.h"           // ← NEW
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Globals
@@ -58,6 +59,9 @@ const unsigned long TX_PGN_LIST[] PROGMEM = {
     126992L, 129025L, 129026L, 129029L, 0
 };
 
+// ── AlertManager instance ─────────────────────────────────────────────────────
+AlertManager alertMgr(NMEA2000, mqttClient);   // ← NEW
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Date helper
 // ═══════════════════════════════════════════════════════════════════════════
@@ -92,30 +96,32 @@ void onGpsData(UBX_NAV_PVT_data_t *d) {
         gpsData.lat      = d->lat    * 1e-7;
         gpsData.lon      = d->lon    * 1e-7;
         gpsData.altMSL   = d->hMSL  * 1e-3;
-        // Geoidal separation = height above ellipsoid - height above MSL.
-        // Both fields are present in every NAV-PVT message, no extra UBX
-        // query needed. This is what was previously hardcoded to 0.0 in
-        // PGN 129029, and explains the inflated altitude readings during
-        // initial bring-up — Axiom/Signal K need this to correctly relate
-        // ellipsoidal height (what the GPS measures) to MSL (what charts use).
         gpsData.geoidSep = (d->height - d->hMSL) * 1e-3;
         gpsData.sogMs    = d->gSpeed * 1e-3;
         gpsData.cogRad   = (d->headMot * 1e-5) * DEG_TO_RAD;
-        // pDOP from NAV-PVT used as a fallback only — NAV-DOP below is authoritative
-        // and provides true HDOP separately (NAV-PVT only carries PDOP)
         gpsData.pdop     = d->pDOP  * 0.01;
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  UBX NAV-DOP callback — authoritative HDOP/PDOP source
-//  Required for Axiom's "meters of accuracy" estimate (PGN 129029 fields 12+13)
+//  UBX NAV-DOP callback
 // ═══════════════════════════════════════════════════════════════════════════
 
 void onGpsDop(UBX_NAV_DOP_data_t *d) {
     if (d == nullptr) return;
-    gpsData.hdop = d->hDOP * 0.01;   // scale factor 0.01 per UBX spec
+    gpsData.hdop = d->hDOP * 0.01;
     gpsData.pdop = d->pDOP * 0.01;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  N2K message handler                                                ← NEW
+// ═══════════════════════════════════════════════════════════════════════════
+
+void onN2kMessage(const tN2kMsg &msg) {
+    switch (msg.PGN) {
+        case 126983L: alertMgr.handlePGN126983(msg); break;
+        default: break;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -160,17 +166,25 @@ void sendPGN126992() {
 //  MQTT
 // ═══════════════════════════════════════════════════════════════════════════
 
+void mqttCallback(char *topic, byte *payload, unsigned int length) {   // ← NEW
+    String t(topic);
+    if (t == MQTT_TOPIC_ALERT_SIL) { alertMgr.mqttSilence(); }
+    else if (t == MQTT_TOPIC_ALERT_ACK) { alertMgr.mqttAck(); }
+}
+
 void setupMqtt() {
     if (!wifiConnected) return;
     mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+    mqttClient.setCallback(mqttCallback);                              // ← NEW
 }
 
 void mqttReconnect() {
     if (mqttClient.connected()) return;
     if (mqttClient.connect(OTA_HOSTNAME)) {
         Serial.println("[MQTT] Connected.");
+        mqttClient.subscribe(MQTT_TOPIC_ALERT_SIL);                   // ← NEW
+        mqttClient.subscribe(MQTT_TOPIC_ALERT_ACK);                   // ← NEW
     }
-    // Non-blocking — if it fails, we just try again on the next loop interval
 }
 
 void publishMqtt() {
@@ -181,22 +195,22 @@ void publishMqtt() {
     }
 
     JsonDocument doc;
-    doc["lat"]     = gpsData.lat;
-    doc["lon"]     = gpsData.lon;
-    doc["alt_m"]   = gpsData.altMSL;
+    doc["lat"]         = gpsData.lat;
+    doc["lon"]         = gpsData.lon;
+    doc["alt_m"]       = gpsData.altMSL;
     doc["geoid_sep_m"] = gpsData.geoidSep;
-    doc["sog_kn"]  = gpsData.sogMs * 1.94384;
-    doc["cog_deg"] = gpsData.cogRad * RAD_TO_DEG;
-    doc["hdop"]    = gpsData.hdop;
-    doc["pdop"]    = gpsData.pdop;
-    doc["numSV"]   = gpsData.numSV;
-    doc["fix"]     = gpsData.valid;
-    doc["time"]    = String(gpsData.year) + "-" +
-                      (gpsData.month < 10 ? "0" : "") + String(gpsData.month) + "-" +
-                      (gpsData.day   < 10 ? "0" : "") + String(gpsData.day)   + "T" +
-                      (gpsData.hour   < 10 ? "0" : "") + String(gpsData.hour)   + ":" +
-                      (gpsData.minute < 10 ? "0" : "") + String(gpsData.minute) + ":" +
-                      (gpsData.second < 10 ? "0" : "") + String(gpsData.second) + "Z";
+    doc["sog_kn"]      = gpsData.sogMs * 1.94384;
+    doc["cog_deg"]     = gpsData.cogRad * RAD_TO_DEG;
+    doc["hdop"]        = gpsData.hdop;
+    doc["pdop"]        = gpsData.pdop;
+    doc["numSV"]       = gpsData.numSV;
+    doc["fix"]         = gpsData.valid;
+    doc["time"]        = String(gpsData.year) + "-" +
+                          (gpsData.month  < 10 ? "0" : "") + String(gpsData.month)  + "-" +
+                          (gpsData.day    < 10 ? "0" : "") + String(gpsData.day)    + "T" +
+                          (gpsData.hour   < 10 ? "0" : "") + String(gpsData.hour)   + ":" +
+                          (gpsData.minute < 10 ? "0" : "") + String(gpsData.minute) + ":" +
+                          (gpsData.second < 10 ? "0" : "") + String(gpsData.second) + "Z";
 
     char payload[256];
     size_t n = serializeJson(doc, payload);
@@ -204,7 +218,7 @@ void publishMqtt() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Web Dashboard — status page with auto-refreshing map
+//  Web Dashboard
 // ═══════════════════════════════════════════════════════════════════════════
 
 const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
@@ -227,6 +241,7 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
   .value { font-size: 20px; font-weight: 600; margin-top: 4px; }
   .ok { color: #4ade80; }
   .bad { color: #f87171; }
+  .warn { color: #fb923c; }
   footer { padding: 10px 18px; font-size: 11px; color: #5a7290; }
 </style>
 </head>
@@ -255,7 +270,17 @@ async function refresh() {
       if (firstFix) { map.setView([d.lat, d.lon], 15); firstFix = false; }
     }
 
-    document.getElementById('grid').innerHTML = `
+    const alertCell = d.alert_active
+      ? `<div class="cell" style="grid-column:1/-1;background:#3b0000">
+           <div class="label">⚠ EMERGENCY ALARM</div>
+           <div class="value warn">ID ${d.alert_id} · src 0x${d.alert_src.toString(16).toUpperCase()} · ${d.alert_age_s}s
+             <button onclick="fetch('/alert/silence')" style="margin-left:12px;padding:4px 10px;background:#7f1d1d;color:#fff;border:none;border-radius:4px;cursor:pointer">SILENCE</button>
+             <button onclick="fetch('/alert/ack')"     style="margin-left:6px; padding:4px 10px;background:#1d3557;color:#fff;border:none;border-radius:4px;cursor:pointer">ACK</button>
+           </div>
+         </div>`
+      : '';
+
+    document.getElementById('grid').innerHTML = alertCell + `
       <div class="cell"><div class="label">Fix</div><div class="value ${d.fix ? 'ok' : 'bad'}">${d.fix ? 'YES' : 'NO FIX'}</div></div>
       <div class="cell"><div class="label">Satellites</div><div class="value">${d.numSV}</div></div>
       <div class="cell"><div class="label">HDOP</div><div class="value">${d.hdop.toFixed(2)}</div></div>
@@ -289,58 +314,66 @@ void handleRoot() {
 
 void handleStatusJson() {
     JsonDocument doc;
-    doc["fix"]     = gpsData.valid;
-    doc["lat"]     = gpsData.lat;
-    doc["lon"]     = gpsData.lon;
-    doc["alt_m"]   = gpsData.altMSL;
-    doc["geoid_sep_m"] = gpsData.geoidSep;
-    doc["sog_kn"]  = gpsData.sogMs * 1.94384;
-    doc["cog_deg"] = gpsData.cogRad * RAD_TO_DEG;
-    doc["hdop"]    = gpsData.hdop;
-    doc["pdop"]    = gpsData.pdop;
-    doc["numSV"]   = gpsData.numSV;
-    doc["mqtt"]    = mqttClient.connected();
-    doc["uptime_s"] = millis() / 1000;
-    doc["ip"]       = WiFi.localIP().toString();
-    doc["ota_port"] = OTA_PORT;
-    doc["heap"]     = ESP.getFreeHeap();
-    doc["time"]    = String(gpsData.year) + "-" +
-                      (gpsData.month < 10 ? "0" : "") + String(gpsData.month) + "-" +
-                      (gpsData.day   < 10 ? "0" : "") + String(gpsData.day)   + " " +
-                      (gpsData.hour   < 10 ? "0" : "") + String(gpsData.hour)   + ":" +
-                      (gpsData.minute < 10 ? "0" : "") + String(gpsData.minute) + ":" +
-                      (gpsData.second < 10 ? "0" : "") + String(gpsData.second) + "Z";
+    doc["fix"]          = gpsData.valid;
+    doc["lat"]          = gpsData.lat;
+    doc["lon"]          = gpsData.lon;
+    doc["alt_m"]        = gpsData.altMSL;
+    doc["geoid_sep_m"]  = gpsData.geoidSep;
+    doc["sog_kn"]       = gpsData.sogMs * 1.94384;
+    doc["cog_deg"]      = gpsData.cogRad * RAD_TO_DEG;
+    doc["hdop"]         = gpsData.hdop;
+    doc["pdop"]         = gpsData.pdop;
+    doc["numSV"]        = gpsData.numSV;
+    doc["mqtt"]         = mqttClient.connected();
+    doc["uptime_s"]     = millis() / 1000;
+    doc["ip"]           = WiFi.localIP().toString();
+    doc["ota_port"]     = OTA_PORT;
+    doc["heap"]         = ESP.getFreeHeap();
+    doc["alert_active"] = alertMgr.isSirenActive();          // ← NEW
+    doc["alert_id"]     = alertMgr.lastAlertID();            // ← NEW
+    doc["alert_src"]    = alertMgr.lastAlertSrc();           // ← NEW
+    doc["alert_age_s"]  = alertMgr.alertAgeSec();            // ← NEW
+    doc["time"]         = String(gpsData.year) + "-" +
+                           (gpsData.month  < 10 ? "0" : "") + String(gpsData.month)  + "-" +
+                           (gpsData.day    < 10 ? "0" : "") + String(gpsData.day)    + " " +
+                           (gpsData.hour   < 10 ? "0" : "") + String(gpsData.hour)   + ":" +
+                           (gpsData.minute < 10 ? "0" : "") + String(gpsData.minute) + ":" +
+                           (gpsData.second < 10 ? "0" : "") + String(gpsData.second) + "Z";
 
     String out;
     serializeJson(doc, out);
     webServer.send(200, "application/json", out);
 }
 
+void handleAlertSilence() {                                            // ← NEW
+    alertMgr.mqttSilence();
+    webServer.send(200, "text/plain", "silenced");
+}
+
+void handleAlertAck() {                                                // ← NEW
+    alertMgr.mqttAck();
+    webServer.send(200, "text/plain", "acknowledged");
+}
+
 void setupWebServer() {
     if (!wifiConnected) return;
-    webServer.on("/", handleRoot);
-    webServer.on("/status.json", handleStatusJson);
+    webServer.on("/",              handleRoot);
+    webServer.on("/status.json",   handleStatusJson);
+    webServer.on("/alert/silence", handleAlertSilence);                // ← NEW
+    webServer.on("/alert/ack",     handleAlertAck);                    // ← NEW
     webServer.begin();
     Serial.printf("[WEB] Dashboard ready — http://%s/\n", WiFi.localIP().toString().c_str());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  WiFi — WiFiManager with timeout
+//  WiFi
 // ═══════════════════════════════════════════════════════════════════════════
 
 void setupWiFi() {
     WiFiManager wm;
-
-    // Silent — no debug output to serial
     wm.setDebugOutput(false);
-
-    // If the portal is triggered, time out after 60s and continue without WiFi
-    // so the N2K bus is never blocked waiting for credentials
     wm.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT);
-
-    // Custom AP name and no password so it's easy to find on a phone
     bool connected = wm.autoConnect(WIFI_AP_NAME);
-
     if (connected) {
         wifiConnected = true;
         Serial.printf("[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
@@ -351,7 +384,7 @@ void setupWiFi() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  OTA — only started if WiFi connected
+//  OTA
 // ═══════════════════════════════════════════════════════════════════════════
 
 void setupOTA() {
@@ -387,11 +420,12 @@ void setupNMEA2000() {
         N2K_DEVICE_CLASS,
         N2K_MANUFACTURER_CODE
     );
-    NMEA2000.SetMode(tNMEA2000::N2km_NodeOnly, N2K_ADDRESS);
+    NMEA2000.SetMode(tNMEA2000::N2km_ListenAndNode, N2K_ADDRESS);  // ← was N2km_NodeOnly
     NMEA2000.ExtendTransmitMessages(TX_PGN_LIST);
+    NMEA2000.SetMsgHandler(onN2kMessage);                  // ← NEW
     NMEA2000.EnableForward(false);
     NMEA2000.Open();
-    Serial.println("[N2K] Bus open — address claiming started.");
+    Serial.println("[N2K] Bus open — RX+TX mode, address claiming started.");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -400,7 +434,7 @@ void setupNMEA2000() {
 
 void setupGPS() {
     Serial1.begin(GPS_BAUD_TARGET, SERIAL_8N1, GPS_UART_RX_PIN, GPS_UART_TX_PIN);
-    delay(100);  // let UART settle
+    delay(100);
 
     uint8_t retries = 5;
     while (!gps.begin(Serial1, 1100, true) && retries > 0) {
@@ -417,8 +451,8 @@ void setupGPS() {
     gps.setUART1Output(COM_TYPE_UBX);
     gps.setNavigationFrequency(GPS_UPDATE_HZ);
     gps.setDynamicModel(DYN_MODEL_SEA);
-    gps.setAutoPVTcallbackPtr(&onGpsData);   // register AFTER begin() succeeds
-    gps.setAutoDOPcallbackPtr(&onGpsDop);    // HDOP/PDOP for Axiom accuracy estimate
+    gps.setAutoPVTcallbackPtr(&onGpsData);
+    gps.setAutoDOPcallbackPtr(&onGpsDop);
     gps.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT);
     Serial.printf("[GPS] HGLRC M100 Pro (u-blox M10) ready — %d Hz, SEA model\n", GPS_UPDATE_HZ);
 }
@@ -431,7 +465,7 @@ void setup() {
     Serial.begin(115200);
     delay(200);
     Serial.println("\n══════════════════════════════════════");
-    Serial.println(" ESP32-S3 NMEA 2000 GPS Node  v1.0.0");
+    Serial.println(" ESP32-S3 NMEA 2000 GPS Node  v1.1.0");
     Serial.println(" XH-S3E + HGLRC M100 Pro + SN65HVD230");
     Serial.println("══════════════════════════════════════");
 
@@ -441,8 +475,9 @@ void setup() {
     setupWebServer();
     setupNMEA2000();
     setupGPS();
+    alertMgr.begin();                                                  // ← NEW
 
-    Serial.println("[BOOT] GPS ready. Waiting for fix...");
+    Serial.println("[BOOT] Ready.");
 }
 
 void loop() {
@@ -454,6 +489,8 @@ void loop() {
     gps.checkUblox();
     gps.checkCallbacks();
     NMEA2000.ParseMessages();
+    alertMgr.update();                                                 // ← NEW
+
     if (!gpsData.valid) return;
     uint32_t now = millis();
     if (now - lastPos     >= INTERVAL_PGN_129025) { lastPos     = now; sendPGN129025(); }
