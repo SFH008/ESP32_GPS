@@ -24,24 +24,33 @@
 #define GPS_UPDATE_HZ       10
 
 // ── Alert Siren — Active 12V piezo via IRLZ44N MOSFET ───────────────────────
-#define SIREN_PIN               GPIO_NUM_8   // MOSFET gate (100Ω series resistor)
-#define SIREN_BUTTON_PIN        GPIO_NUM_9   // Momentary button → GND, internal pull-up
-#define SIREN_TIMEOUT_MS        120000       // Safety auto-off after 120s
-#define SIREN_BUTTON_DEBOUNCE   50           // ms
+#define SIREN_PIN               GPIO_NUM_8
+#define SIREN_BUTTON_PIN        GPIO_NUM_9
+#define SIREN_TIMEOUT_MS        120000
+#define SIREN_BUTTON_DEBOUNCE   50
 
 // ── WiFi / OTA ───────────────────────────────────────────────────────────────
 #define WIFI_AP_NAME            "GPS-N2K-Setup"
-#define WIFI_PORTAL_TIMEOUT     60
+#define WIFI_PORTAL_TIMEOUT     120             // seconds — longer for boat use
 #define OTA_HOSTNAME            "gps-n2k"
 #define OTA_PORT                3232
+
+// ── NVS — persistent config storage ─────────────────────────────────────────
+// Namespace and keys used by Preferences library
+#define NVS_NAMESPACE           "gps_cfg"
+#define NVS_KEY_STATIC_IP       "static_ip"     // string — empty = DHCP
+#define NVS_KEY_GATEWAY         "gateway"
+#define NVS_KEY_SUBNET          "subnet"
+#define NVS_KEY_FORCE_PORTAL    "force_portal"  // uint8 — 1 = open portal on next boot
 
 // ── MQTT ─────────────────────────────────────────────────────────────────────
 #define MQTT_BROKER             "192.168.2.120"
 #define MQTT_PORT               1883
 #define MQTT_TOPIC_GPS          "gps-n2k/position"
-#define MQTT_TOPIC_ALERT_STATE  "gps-n2k/alert/active"    // publish: alert status 1 Hz
-#define MQTT_TOPIC_ALERT_SIL    "gps-n2k/alert/silence"   // subscribe: any payload → silence
-#define MQTT_TOPIC_ALERT_ACK    "gps-n2k/alert/ack"       // subscribe: any payload → ACK
+#define MQTT_TOPIC_ALERT_STATE  "gps-n2k/alert/active"
+#define MQTT_TOPIC_ALERT_SIL    "gps-n2k/alert/silence"
+#define MQTT_TOPIC_ALERT_ACK    "gps-n2k/alert/ack"
+#define MQTT_TOPIC_CONFIG_PORTAL "gps-n2k/config/portal"  // any payload → reboot to portal
 #define INTERVAL_MQTT_MS        1000
 
 // ── NMEA 2000 Device Identity ─────────────────────────────────────────────────
@@ -53,7 +62,7 @@
 #define N2K_DEVICE_INSTANCE         0
 #define N2K_SYSTEM_INSTANCE         0
 #define N2K_DEVICE_MODEL_ID         "XH-S3E-GPS-NODE"
-#define N2K_DEVICE_SW_VERSION       "1.1.0"
+#define N2K_DEVICE_SW_VERSION       "1.2.0"
 #define N2K_DEVICE_MODEL_VERSION    "XH-S3E+M100Pro"
 #define N2K_DEVICE_SERIAL_CODE      "00000002"
 #define N2K_ADDRESS                 35

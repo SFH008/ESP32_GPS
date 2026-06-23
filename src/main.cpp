@@ -5,6 +5,7 @@
 #include <WiFiManager.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 
 // ── NMEA 2000 via TWAI ───────────────────────────────────────────────────────
 #include <NMEA2000_esp32_twai.h>
@@ -15,7 +16,7 @@
 #include <SparkFun_u-blox_GNSS_v3.h>
 
 #include "Config.h"
-#include "AlertManager.h"           // ← NEW
+#include "AlertManager.h"
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Globals
@@ -27,6 +28,7 @@ SFE_UBLOX_GNSS_SERIAL gps;
 WiFiClient   espClient;
 PubSubClient mqttClient(espClient);
 WebServer    webServer(80);
+Preferences  prefs;
 
 bool wifiConnected = false;
 
@@ -59,8 +61,7 @@ const unsigned long TX_PGN_LIST[] PROGMEM = {
     126992L, 129025L, 129026L, 129029L, 0
 };
 
-// ── AlertManager instance ─────────────────────────────────────────────────────
-AlertManager alertMgr(NMEA2000, mqttClient);   // ← NEW
+AlertManager alertMgr(NMEA2000, mqttClient);
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Date helper
@@ -114,7 +115,7 @@ void onGpsDop(UBX_NAV_DOP_data_t *d) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  N2K message handler                                                ← NEW
+//  N2K message handler
 // ═══════════════════════════════════════════════════════════════════════════
 
 void onN2kMessage(const tN2kMsg &msg) {
@@ -166,24 +167,34 @@ void sendPGN126992() {
 //  MQTT
 // ═══════════════════════════════════════════════════════════════════════════
 
-void mqttCallback(char *topic, byte *payload, unsigned int length) {   // ← NEW
+void mqttCallback(char *topic, byte *payload, unsigned int length) {
     String t(topic);
-    if (t == MQTT_TOPIC_ALERT_SIL) { alertMgr.mqttSilence(); }
-    else if (t == MQTT_TOPIC_ALERT_ACK) { alertMgr.mqttAck(); }
+    if      (t == MQTT_TOPIC_ALERT_SIL)     { alertMgr.mqttSilence(); }
+    else if (t == MQTT_TOPIC_ALERT_ACK)     { alertMgr.mqttAck(); }
+    else if (t == MQTT_TOPIC_CONFIG_PORTAL) {
+        // Write flag to NVS then reboot — setupWiFi() will see it and force portal
+        Serial.println("[CFG] Portal requested via MQTT — rebooting...");
+        prefs.begin(NVS_NAMESPACE, false);
+        prefs.putUChar(NVS_KEY_FORCE_PORTAL, 1);
+        prefs.end();
+        delay(200);
+        ESP.restart();
+    }
 }
 
 void setupMqtt() {
     if (!wifiConnected) return;
     mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
-    mqttClient.setCallback(mqttCallback);                              // ← NEW
+    mqttClient.setCallback(mqttCallback);
 }
 
 void mqttReconnect() {
     if (mqttClient.connected()) return;
     if (mqttClient.connect(OTA_HOSTNAME)) {
         Serial.println("[MQTT] Connected.");
-        mqttClient.subscribe(MQTT_TOPIC_ALERT_SIL);                   // ← NEW
-        mqttClient.subscribe(MQTT_TOPIC_ALERT_ACK);                   // ← NEW
+        mqttClient.subscribe(MQTT_TOPIC_ALERT_SIL);
+        mqttClient.subscribe(MQTT_TOPIC_ALERT_ACK);
+        mqttClient.subscribe(MQTT_TOPIC_CONFIG_PORTAL);
     }
 }
 
@@ -212,9 +223,9 @@ void publishMqtt() {
                           (gpsData.minute < 10 ? "0" : "") + String(gpsData.minute) + ":" +
                           (gpsData.second < 10 ? "0" : "") + String(gpsData.second) + "Z";
 
-    char payload[256];
-    size_t n = serializeJson(doc, payload);
-    mqttClient.publish(MQTT_TOPIC_GPS, payload, n);
+    char buf[256];
+    size_t n = serializeJson(doc, buf);
+    mqttClient.publish(MQTT_TOPIC_GPS, buf, n);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -275,7 +286,7 @@ async function refresh() {
            <div class="label">⚠ EMERGENCY ALARM</div>
            <div class="value warn">ID ${d.alert_id} · src 0x${d.alert_src.toString(16).toUpperCase()} · ${d.alert_age_s}s
              <button onclick="fetch('/alert/silence')" style="margin-left:12px;padding:4px 10px;background:#7f1d1d;color:#fff;border:none;border-radius:4px;cursor:pointer">SILENCE</button>
-             <button onclick="fetch('/alert/ack')"     style="margin-left:6px; padding:4px 10px;background:#1d3557;color:#fff;border:none;border-radius:4px;cursor:pointer">ACK</button>
+             <button onclick="fetch('/alert/ack')"     style="margin-left:6px;padding:4px 10px;background:#1d3557;color:#fff;border:none;border-radius:4px;cursor:pointer">ACK</button>
            </div>
          </div>`
       : '';
@@ -292,6 +303,7 @@ async function refresh() {
       <div class="cell"><div class="label">COG</div><div class="value">${d.cog_deg.toFixed(1)}°</div></div>
       <div class="cell"><div class="label">N2K Bus</div><div class="value ok">OPEN</div></div>
       <div class="cell"><div class="label">MQTT</div><div class="value ${d.mqtt ? 'ok' : 'bad'}">${d.mqtt ? 'CONNECTED' : 'DOWN'}</div></div>
+      <div class="cell"><div class="label">IP</div><div class="value">${d.ip}</div></div>
       <div class="cell"><div class="label">Uptime</div><div class="value">${d.uptime_s}s</div></div>
       <div class="cell"><div class="label">GPS Time</div><div class="value">${d.time}</div></div>
     `;
@@ -329,10 +341,10 @@ void handleStatusJson() {
     doc["ip"]           = WiFi.localIP().toString();
     doc["ota_port"]     = OTA_PORT;
     doc["heap"]         = ESP.getFreeHeap();
-    doc["alert_active"] = alertMgr.isSirenActive();          // ← NEW
-    doc["alert_id"]     = alertMgr.lastAlertID();            // ← NEW
-    doc["alert_src"]    = alertMgr.lastAlertSrc();           // ← NEW
-    doc["alert_age_s"]  = alertMgr.alertAgeSec();            // ← NEW
+    doc["alert_active"] = alertMgr.isSirenActive();
+    doc["alert_id"]     = alertMgr.lastAlertID();
+    doc["alert_src"]    = alertMgr.lastAlertSrc();
+    doc["alert_age_s"]  = alertMgr.alertAgeSec();
     doc["time"]         = String(gpsData.year) + "-" +
                            (gpsData.month  < 10 ? "0" : "") + String(gpsData.month)  + "-" +
                            (gpsData.day    < 10 ? "0" : "") + String(gpsData.day)    + " " +
@@ -345,12 +357,12 @@ void handleStatusJson() {
     webServer.send(200, "application/json", out);
 }
 
-void handleAlertSilence() {                                            // ← NEW
+void handleAlertSilence() {
     alertMgr.mqttSilence();
     webServer.send(200, "text/plain", "silenced");
 }
 
-void handleAlertAck() {                                                // ← NEW
+void handleAlertAck() {
     alertMgr.mqttAck();
     webServer.send(200, "text/plain", "acknowledged");
 }
@@ -359,27 +371,75 @@ void setupWebServer() {
     if (!wifiConnected) return;
     webServer.on("/",              handleRoot);
     webServer.on("/status.json",   handleStatusJson);
-    webServer.on("/alert/silence", handleAlertSilence);                // ← NEW
-    webServer.on("/alert/ack",     handleAlertAck);                    // ← NEW
+    webServer.on("/alert/silence", handleAlertSilence);
+    webServer.on("/alert/ack",     handleAlertAck);
     webServer.begin();
     Serial.printf("[WEB] Dashboard ready — http://%s/\n", WiFi.localIP().toString().c_str());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  WiFi
+//  WiFi — WiFiManager with NVS static IP + portal-on-demand
 // ═══════════════════════════════════════════════════════════════════════════
 
 void setupWiFi() {
     WiFiManager wm;
     wm.setDebugOutput(false);
     wm.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT);
-    bool connected = wm.autoConnect(WIFI_AP_NAME);
+
+    // ── Read NVS ─────────────────────────────────────────────────────────────
+    prefs.begin(NVS_NAMESPACE, false);
+    bool    forcePortal = prefs.getUChar(NVS_KEY_FORCE_PORTAL, 0) == 1;
+    String  savedIP     = prefs.getString(NVS_KEY_STATIC_IP, "");
+    String  savedGW     = prefs.getString(NVS_KEY_GATEWAY,   "192.168.2.1");
+    String  savedSN     = prefs.getString(NVS_KEY_SUBNET,    "255.255.255.0");
+
+    if (forcePortal) {
+        prefs.putUChar(NVS_KEY_FORCE_PORTAL, 0);   // clear flag immediately
+        Serial.println("[WiFi] Portal forced via MQTT command.");
+    }
+    prefs.end();
+
+    // ── Apply static IP if configured ────────────────────────────────────────
+    if (savedIP.length() > 0) {
+        IPAddress ip, gw, sn;
+        if (ip.fromString(savedIP) && gw.fromString(savedGW) && sn.fromString(savedSN)) {
+            wm.setSTAStaticIPConfig(ip, gw, sn);
+            Serial.printf("[WiFi] Static IP configured: %s\n", savedIP.c_str());
+        }
+    }
+
+    // ── Custom portal field — pre-filled with current saved value ─────────────
+    WiFiManagerParameter paramIP("ip", "Static IP (blank = DHCP)", savedIP.c_str(), 16);
+    wm.addParameter(&paramIP);
+
+    // ── Save callback — writes new IP to NVS ─────────────────────────────────
+    wm.setSaveParamsCallback([&]() {
+        String newIP = String(paramIP.getValue());
+        newIP.trim();
+        prefs.begin(NVS_NAMESPACE, false);
+        if (newIP.length() > 0) {
+            prefs.putString(NVS_KEY_STATIC_IP, newIP);
+            prefs.putString(NVS_KEY_GATEWAY,   savedGW);
+            prefs.putString(NVS_KEY_SUBNET,     savedSN);
+            Serial.printf("[CFG] Static IP saved: %s\n", newIP.c_str());
+        } else {
+            prefs.remove(NVS_KEY_STATIC_IP);
+            Serial.println("[CFG] Static IP cleared — will use DHCP.");
+        }
+        prefs.end();
+    });
+
+    // ── Connect or open portal ────────────────────────────────────────────────
+    bool connected = forcePortal
+        ? wm.startConfigPortal(WIFI_AP_NAME)
+        : wm.autoConnect(WIFI_AP_NAME);
+
     if (connected) {
         wifiConnected = true;
         Serial.printf("[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
     } else {
         wifiConnected = false;
-        Serial.println("[WiFi] Not connected — N2K running without OTA.");
+        Serial.println("[WiFi] Not connected — N2K running without WiFi.");
     }
 }
 
@@ -420,9 +480,9 @@ void setupNMEA2000() {
         N2K_DEVICE_CLASS,
         N2K_MANUFACTURER_CODE
     );
-    NMEA2000.SetMode(tNMEA2000::N2km_ListenAndNode, N2K_ADDRESS);  // ← was N2km_NodeOnly
+    NMEA2000.SetMode(tNMEA2000::N2km_ListenAndNode, N2K_ADDRESS);
     NMEA2000.ExtendTransmitMessages(TX_PGN_LIST);
-    NMEA2000.SetMsgHandler(onN2kMessage);                  // ← NEW
+    NMEA2000.SetMsgHandler(onN2kMessage);
     NMEA2000.EnableForward(false);
     NMEA2000.Open();
     Serial.println("[N2K] Bus open — RX+TX mode, address claiming started.");
@@ -465,7 +525,7 @@ void setup() {
     Serial.begin(115200);
     delay(200);
     Serial.println("\n══════════════════════════════════════");
-    Serial.println(" ESP32-S3 NMEA 2000 GPS Node  v1.1.0");
+    Serial.println(" ESP32-S3 NMEA 2000 GPS Node  v1.2.0");
     Serial.println(" XH-S3E + HGLRC M100 Pro + SN65HVD230");
     Serial.println("══════════════════════════════════════");
 
@@ -475,7 +535,7 @@ void setup() {
     setupWebServer();
     setupNMEA2000();
     setupGPS();
-    alertMgr.begin();                                                  // ← NEW
+    alertMgr.begin();
 
     Serial.println("[BOOT] Ready.");
 }
@@ -489,7 +549,7 @@ void loop() {
     gps.checkUblox();
     gps.checkCallbacks();
     NMEA2000.ParseMessages();
-    alertMgr.update();                                                 // ← NEW
+    alertMgr.update();
 
     if (!gpsData.valid) return;
     uint32_t now = millis();
