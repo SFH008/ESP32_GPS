@@ -13,11 +13,10 @@
 #include <PubSubClient.h>
 #include "Config.h"
 
-// ── PGN 126984 response command byte values (N2K spec table) ────────────────
+// PGN 126984 response command byte values (N2K spec table)
 #define N2K_ALERT_RESP_SILENCE      0x01
 #define N2K_ALERT_RESP_ACKNOWLEDGE  0x02
 
-// ── Active alert record ──────────────────────────────────────────────────────
 struct ActiveAlert {
     uint16_t alertID     = 0;
     uint8_t  srcAddr     = 0;
@@ -26,7 +25,6 @@ struct ActiveAlert {
     uint32_t startedAt   = 0;
 };
 
-// ── AlertManager ─────────────────────────────────────────────────────────────
 class AlertManager {
 public:
     AlertManager(NMEA2000_esp32_twai &n2k, PubSubClient &mqtt);
@@ -52,10 +50,10 @@ private:
     bool         _sirenOn         = false;
     uint32_t     _lastMqttPub     = 0;
     uint32_t     _lastButtonRead  = 0;
-    bool         _lastButtonState = true;   // HIGH = not pressed
+    bool         _lastButtonState = true;
 
     void _sirenOn_();
     void _sirenOff_();
-    void _sendAlertResponse(uint8_t resp);  // raw byte, no lib enum needed
+    void _sendAlertResponse(uint8_t resp);
     void _publishMqttStatus();
 };

@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════
-//  AlertManager.cpp
+//  AlertManager.cpp — N2K PGN 126983 receive, siren drive, silence/ACK
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include "AlertManager.h"
@@ -20,7 +20,7 @@ void AlertManager::begin() {
 void AlertManager::update() {
     uint32_t now = millis();
 
-    // ── Button debounce ───────────────────────────────────────────────────────
+    // Button debounce
     if (now - _lastButtonRead >= SIREN_BUTTON_DEBOUNCE) {
         _lastButtonRead = now;
         bool currentState = digitalRead(SIREN_BUTTON_PIN);
@@ -35,14 +35,13 @@ void AlertManager::update() {
         _lastButtonState = currentState;
     }
 
-    // ── Safety timeout ────────────────────────────────────────────────────────
+    // Safety timeout
     if (_sirenOn && (now - _alert.startedAt >= SIREN_TIMEOUT_MS)) {
         Serial.println("[ALERT] Safety timeout — siren auto-off.");
         _sirenOff_();
-        // No 126984 sent — local safety only, source still considers alert active
     }
 
-    // ── MQTT status publish 1 Hz while alert active ───────────────────────────
+    // MQTT status 1 Hz while alert active
     if (_alert.active || _sirenOn) {
         if (now - _lastMqttPub >= 1000) {
             _lastMqttPub = now;
@@ -52,7 +51,7 @@ void AlertManager::update() {
 }
 
 void AlertManager::handlePGN126983(const tN2kMsg &msg) {
-    // PGN 126983 raw byte layout (fast-packet assembled frame):
+    // PGN 126983 raw byte layout:
     //   [0]   bits 3:0 = Alert Type  (0=Emergency, 1=Alarm, 2=Warning, 3=Caution)
     //   [1]   Alert System
     //   [2]   Alert Sub-System
@@ -61,7 +60,6 @@ void AlertManager::handlePGN126983(const tN2kMsg &msg) {
     //   [6]   Data Source Instance
     //   [7]   bits 3:0 = Alert State (0=Emergency/Active, 1=Active, 2=AwaitAck,
     //                                 3=Ack, 4=Silenced, 5=Acknowledged, 6=Normal)
-
     if (msg.DataLen < 8) return;
 
     uint8_t  alertType  = msg.Data[0] & 0x0F;
@@ -71,8 +69,8 @@ void AlertManager::handlePGN126983(const tN2kMsg &msg) {
     uint8_t  srcAddr    = msg.Source;
 
     bool isEmergency = (alertType == 0);
-    bool isActive    = (alertState <= 2);   // 0=Emergency, 1=Active, 2=AwaitAck
-    bool isCleared   = (alertState >= 5);   // 5=Acknowledged, 6=Normal, 7=Disabled
+    bool isActive    = (alertState <= 2);
+    bool isCleared   = (alertState >= 5);
 
     if (isEmergency && isActive) {
         _alert.alertID     = alertID;
@@ -81,7 +79,7 @@ void AlertManager::handlePGN126983(const tN2kMsg &msg) {
         _alert.active      = true;
         if (!_sirenOn) {
             _alert.startedAt = millis();
-            Serial.printf("[ALERT] Emergency Alarm! ID=%u src=0x%02X sys=%u — SIREN ON\n",
+            Serial.printf("[ALERT] Emergency! ID=%u src=0x%02X sys=%u — SIREN ON\n",
                           alertID, srcAddr, alertSys);
         }
         _sirenOn_();
@@ -89,9 +87,9 @@ void AlertManager::handlePGN126983(const tN2kMsg &msg) {
 
     } else if (isEmergency && isCleared
                && _alert.active
-               && alertID  == _alert.alertID
-               && srcAddr  == _alert.srcAddr) {
-        Serial.printf("[ALERT] Emergency ID=%u cleared by source — siren off.\n", alertID);
+               && alertID == _alert.alertID
+               && srcAddr == _alert.srcAddr) {
+        Serial.printf("[ALERT] Emergency ID=%u cleared — siren off.\n", alertID);
         _alert.active = false;
         _sirenOff_();
         _publishMqttStatus();
@@ -115,8 +113,6 @@ void AlertManager::mqttAck() {
     _publishMqttStatus();
 }
 
-// ── Private ───────────────────────────────────────────────────────────────────
-
 void AlertManager::_sirenOn_() {
     if (_sirenOn) return;
     _sirenOn = true;
@@ -134,24 +130,24 @@ void AlertManager::_sendAlertResponse(uint8_t resp) {
     N2kMsg.SetPGN(126984L);
     N2kMsg.Priority    = 7;
     N2kMsg.Destination = _alert.srcAddr;
-    N2kMsg.AddByte(0x00);                   // Alert Type=Emergency, Category=bridge
+    N2kMsg.AddByte(0x00);
     N2kMsg.AddByte(_alert.alertSystem);
     N2kMsg.Add2ByteUInt(_alert.alertID);
-    N2kMsg.AddByte(resp);                   // 0x01=Silence, 0x02=Acknowledge
+    N2kMsg.AddByte(resp);
     N2kMsg.AddByte(_alert.srcAddr);
     _n2k.SendMsg(N2kMsg);
-    Serial.printf("[ALERT] PGN 126984 sent resp=0x%02X to src=0x%02X alertID=%u\n",
+    Serial.printf("[ALERT] PGN 126984 sent resp=0x%02X to 0x%02X alertID=%u\n",
                   resp, _alert.srcAddr, _alert.alertID);
 }
 
 void AlertManager::_publishMqttStatus() {
     if (!_mqtt.connected()) return;
     JsonDocument doc;
-    doc["active"]   = _alert.active;
-    doc["siren"]    = _sirenOn;
-    doc["alertID"]  = _alert.alertID;
-    doc["srcAddr"]  = _alert.srcAddr;
-    doc["since_s"]  = alertAgeSec();
+    doc["active"]  = _alert.active;
+    doc["siren"]   = _sirenOn;
+    doc["alertID"] = _alert.alertID;
+    doc["srcAddr"] = _alert.srcAddr;
+    doc["since_s"] = alertAgeSec();
     char buf[128];
     size_t n = serializeJson(doc, buf);
     _mqtt.publish(MQTT_TOPIC_ALERT_STATE, buf, n);
