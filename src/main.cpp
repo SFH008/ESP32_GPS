@@ -17,6 +17,7 @@
 
 #include "Config.h"
 #include "AlertManager.h"
+#include "EGM96Europe.h"
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Globals
@@ -43,7 +44,8 @@ uint32_t lastMqtt    = 0;
 struct GpsData {
     double   lat          = 0.0;
     double   lon          = 0.0;
-    double   altWGS84     = 0.0;
+    double   altMSL       = 0.0;   // MSL from NAV-PVT hMSL (m)
+    double   altWGS84     = 0.0;   // WGS84 = MSL + geoid sep (m)
     double   geoidSep     = 0.0;
     double   sogMs        = 0.0;
     double   cogRad       = 0.0;
@@ -105,8 +107,9 @@ void onGpsData(UBX_NAV_PVT_data_t *d) {
     if (fixOk) {
         gpsData.lat      = d->lat    * 1e-7;
         gpsData.lon      = d->lon    * 1e-7;
-        gpsData.altWGS84 = d->height * 1e-3;           // WGS84 ellipsoidal, not hMSL
-        gpsData.geoidSep = (d->height - d->hMSL) * 1e-3;
+        gpsData.altMSL   = d->hMSL   * 1e-3;           // MSL altitude (m)
+        gpsData.geoidSep = egm96GetGeoidSep(gpsData.lat, gpsData.lon); // EGM96 lookup
+        gpsData.altWGS84 = gpsData.altMSL + gpsData.geoidSep;          // WGS84 = MSL + sep
         gpsData.sogMs    = d->gSpeed  * 1e-3;
         gpsData.cogRad   = (d->headMot * 1e-5) * DEG_TO_RAD;
         currentSID++;
